@@ -499,7 +499,8 @@ dihuman_run.py                                     legacy Wenet ONNX streaming d
   only as a preview.
 - 本开源代码有意不包含大型数据集、checkpoint、实验生成结果和大型预训练权重。`demo/` 下的小 demo 视频仅用于效果预览。
 
-流式推理的代码还没有搞。之后会更新上来。同时这个项目也会开源C++的流式推理代码以便移动端部署。点个star吧。
+流式推理的代码还没有搞。之后会更新上来。同时这个项目也会开源C++的流式推理代码以便移动端部署。
+## 歪比巴卜！！！！点个star吧！！！！
 
 ## License / 许可证
 
