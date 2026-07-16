@@ -252,17 +252,28 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 ## Required Weights / 必需权重
 
-Large binary weights are not included in this source release.
+The lightweight preprocessing models are included in this source release:
 
-开源代码中不包含大型二进制权重文件。
-
-Place these files under `data_utils/` before preprocessing:
+开源代码已经包含预处理必需的轻量模型：
 
 ```text
-data_utils/scrfd_2.5g_kps.onnx
-data_utils/checkpoint_epoch_335.pth.tar
+data_utils/scrfd_2.5g_kps.onnx          # face detector / 人脸检测
+data_utils/checkpoint_epoch_335.pth.tar # landmark detector / 关键点检测
+```
+
+Wenet feature extraction still needs a large encoder file, which is not included because it is about
+110 MB. Download it and place it under `data_utils/` only if you want to use `--asr wenet`:
+
+Wenet 特征提取仍然需要一个较大的 encoder 文件，约 110MB，因此不直接放进仓库。只有使用 `--asr wenet`
+时才需要下载并放到 `data_utils/` 下：
+
+```text
 data_utils/encoder.onnx                 # only needed for Wenet feature extraction
 ```
+
+Download link / 下载链接：
+
+[encoder.onnx](https://drive.google.com/file/d/1e4Z9zS053JEWl6Mj3W9Lbc9GDtzHIg6b/view?usp=drive_link)
 
 Original HuBERT extraction uses Hugging Face Transformers and downloads:
 

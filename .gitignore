@@ -60,6 +60,10 @@ syncnet_ckpt/
 *.onnx
 *.safetensors
 
+# Required lightweight preprocessing models are included in the source release.
+!data_utils/scrfd_2.5g_kps.onnx
+!data_utils/checkpoint_epoch_335.pth.tar
+
 # Keep demo images if intentionally tracked.
 !demo/*.JPG
 !demo/*.jpeg
