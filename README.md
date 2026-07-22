@@ -17,6 +17,10 @@ This preview was generated with the latest FeatherHuBERT audio encoder and the m
 
 [Open demo video / 打开 demo 视频](./demo/feathertalk_demo_latest_188.mp4)
 
+## Latest Updates / 本次更新
+
+# C++流式推理代码来了 ！！！！！！！！！！详情见 [README](./FeatherTalk-CPP/README.md)。欢迎大家试用，star，issue。
+以下是codex写的⬇️。
 ## Demo Training Assets / Demo 训练资源
 
 Download the demo training asset pack from Google Drive:
@@ -476,6 +480,88 @@ MobileOne export uses the reparameterized inference graph by default.
 
 MobileOne 导出时默认使用重参数化后的推理图。
 
+## C++ Offline Inference / C++ 离线推理
+
+`FeatherTalk-CPP/` provides a standalone macOS/Apple Silicon C++ runner for
+the latest FeatherHuBERT + FeatherTalk UNet path. It runs the 16 kHz waveform
+encoder and UNet directly through MNN with CPU, Metal, or OpenCL backends. MNN
+models are converted with FP16 convolution weights, and output frames are piped
+to `ffmpeg` without creating a large temporary image sequence.
+
+`FeatherTalk-CPP/` 提供了可直接运行的 macOS/Apple Silicon C++ 离线推理版本。它通过
+MNN 的 CPU、Metal 或 OpenCL 后端直接运行 16kHz waveform 的 FeatherHuBERT 和 UNet。MNN
+模型使用 FP16 卷积权重，输出帧会直接管道传给 `ffmpeg`，不会产生大量临时图片。
+
+See [FeatherTalk-CPP/README.md](./FeatherTalk-CPP/README.md) for dependency setup,
+checkpoint export, and the complete run command.
+
+完整依赖安装、checkpoint 导出和运行命令见
+[FeatherTalk-CPP/README.md](./FeatherTalk-CPP/README.md)。
+
+## Streaming Inference / 流式推理
+
+`dihuman_run.py` now supports both the legacy Wenet streaming encoder and the new
+FeatherHuBERT-compatible lightweight path.
+
+`dihuman_run.py` 现在同时支持旧版 Wenet 流式 encoder，以及新的 FeatherHuBERT 轻量模型路径。
+
+Wenet streaming / Wenet 流式：
+
+```bash
+python dihuman_run.py \
+  --asr wenet \
+  --data_path /path/to/your_video_folder \
+  --unet_onnx ./wenet_unet.onnx \
+  --encoder_onnx ./encoder.onnx \
+  --audio_wav /path/to/test.wav \
+  --out_video ./stream_video.mp4 \
+  --out_audio ./stream_audio.wav \
+  --video_size 1280 720
+```
+
+FeatherHuBERT + HuBERT-shape UNet / FeatherHuBERT + HuBERT 形状 UNet：
+
+```bash
+python dihuman_run.py \
+  --asr feather_hubert \
+  --data_path /path/to/your_video_folder \
+  --unet_onnx ./feathertalk_mobileone.onnx \
+  --feather_hubert_checkpoint ./feather_hubert_ckpt/last.pth \
+  --feather_right_context_frames 4 \
+  --audio_wav /path/to/test.wav \
+  --out_video ./stream_video.mp4 \
+  --out_audio ./stream_audio.wav \
+  --video_size 1280 720
+```
+
+The FeatherHuBERT path consumes 16 kHz waveform directly and feeds the UNet with
+HuBERT-compatible audio tensors shaped `[1, 16, 32, 32]`. It uses 25 fps by default:
+two 20 ms HuBERT tokens are grouped into one video frame.
+
+FeatherHuBERT 路线直接输入 16kHz waveform，并向 UNet 输入 HuBERT 兼容的 `[1, 16, 32, 32]`
+音频张量。默认视频帧率是 25fps：两个 20ms HuBERT token 对应一帧视频。
+
+`--feather_right_context_frames` controls the small look-ahead used before emitting
+FeatherHuBERT features. The default `4` is a stability-first setting; set it to `0` for lower
+latency when you are profiling real-time behavior.
+
+`--feather_right_context_frames` 控制 FeatherHuBERT 特征输出前等待的右上下文帧数。默认 `4`
+更偏稳定；如果要压低实时延迟，可以设成 `0` 做性能测试。
+
+For a quick Python demo, pass a `.pth` checkpoint through `--feather_hubert_checkpoint`.
+For deployment, export FeatherHuBERT to ONNX separately and pass it with `--encoder_onnx`;
+the expected encoder ONNX output is `[1, audio_tokens, 1024]`.
+
+快速 Python demo 可以直接通过 `--feather_hubert_checkpoint` 加载 `.pth`。部署时可以把
+FeatherHuBERT 单独导出为 ONNX，然后通过 `--encoder_onnx` 传入；encoder ONNX 的期望输出是
+`[1, audio_tokens, 1024]`。
+
+Merge audio and video / 合并音视频：
+
+```bash
+ffmpeg -i stream_video.mp4 -i stream_audio.wav -c:v libx264 -c:a aac result_stream.mp4
+```
+
 ## File Overview / 文件结构
 
 ```text
@@ -491,7 +577,8 @@ pth2onnx.py                                        ONNX export / ONNX 导出
 unet.py                                            original lightweight UNet / 原始轻量 UNet
 unet_mobileone.py                                  MobileOne-style UNet / MobileOne 版 UNet
 model_factory.py                                   original/mobileone model selector / 模型选择器
-dihuman_run.py                                     legacy Wenet ONNX streaming demo / 旧版 Wenet ONNX 流式 demo
+dihuman_run.py                                     Wenet + FeatherHuBERT streaming inference / Wenet + FeatherHuBERT 流式推理
+FeatherTalk-CPP/                                    standalone C++ offline inference / 独立 C++ 离线推理
 ```
 
 ## Notes / 说明
@@ -509,8 +596,6 @@ dihuman_run.py                                     legacy Wenet ONNX streaming d
   intentionally excluded from this source release. The small demo video under `demo/` is included
   only as a preview.
 - 本开源代码有意不包含大型数据集、checkpoint、实验生成结果和大型预训练权重。`demo/` 下的小 demo 视频仅用于效果预览。
-
-流式推理的代码还没有搞。之后会更新上来。同时这个项目也会开源C++的流式推理代码以便移动端部署。
 ## 歪比巴卜！！！！点个star吧！！！！
 
 ## License / 许可证

@@ -1,0 +1,6 @@
+bin/
+models/
+third_party/stb/
+third_party/MNN/
+third_party/.downloads/
+*.frames/
