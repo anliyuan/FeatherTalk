@@ -1,5 +1,7 @@
 # FeatherTalk
 
+**C++流式推理代码来了 ！！！！！！！！！！详情见** [**README**](https://github.com/anliyuan/FeatherTalk/blob/main/FeatherTalk-CPP/README.md)**。欢迎大家试用，star，issue。**
+
 FeatherTalk is a lightweight audio-driven talking-head framework. It is a cleaned-up and
 extended version of [Ultralight-Digital-Human](https://github.com/anliyuan/Ultralight-Digital-Human),
 focused on personalized digital-human training, smaller audio features, and mobile-friendly UNet deployment.
@@ -17,10 +19,6 @@ This preview was generated with the latest FeatherHuBERT audio encoder and the m
 
 [Open demo video / 打开 demo 视频](./demo/feathertalk_demo_latest_188.mp4)
 
-## Latest Updates / 本次更新
-
-# C++流式推理代码来了 ！！！！！！！！！！详情见 [README](./FeatherTalk-CPP/README.md)。欢迎大家试用，star，issue。
-以下是codex写的⬇️。
 ## Demo Training Assets / Demo 训练资源
 
 Download the demo training asset pack from Google Drive:
