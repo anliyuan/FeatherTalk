@@ -1,3 +1,5 @@
+
+
 # FeatherTalk
 
 **C++流式推理代码来了 ！！！！！！！！！！详情见** [**README**](https://github.com/anliyuan/FeatherTalk/blob/main/FeatherTalk-CPP/README.md)**。欢迎大家试用，star，issue。**
@@ -567,6 +569,7 @@ data_utils/process.py                              preprocessing / 数据预处�
 data_utils/hubert.py                               original HuBERT feature extraction / 原始 HuBERT 特征
 data_utils/wenet_infer.py                          Wenet feature extraction / Wenet 特征
 data_utils/feather_hubert/                         FeatherHuBERT feature extraction / FeatherHuBERT 特征提取
+dataset_mouth_roi.py                               dataset variant with mouth ROI masks for weighted losses / 带嘴部 ROI 掩码的数据集
 train.py                                           baseline training / 基础训练
 train_mouth_roi_loss.py                            mouth ROI loss training / 嘴部 ROI loss 训练
 train_mouth_roi_temporal_loss.py                   mouth ROI + temporal loss training / 连续帧 loss 训练
