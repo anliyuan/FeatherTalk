@@ -1,12 +1,8 @@
-import argparse
-from os import wait3
-
 import numpy as np
 import cv2
 import math
 
 import torch
-import torchvision
 from detect_face import SCRFD
 # from models.pfld_lite import PFLDInference
 # from models.pfld import PFLDInference
@@ -30,7 +26,7 @@ def face_det(img, model):
         cy = (y2+y1)//2
         wh = np.asarray([w,h])
         boxsize = int(np.max(wh)*1.05)
-        
+
         size = boxsize
         xy = np.asarray((cx - size // 2, cy - size//2), dtype=np.int32)
         x1, y1 = xy
@@ -69,14 +65,19 @@ def face_det(img, model):
 
 class Landmark:
     def __init__(self):
-        
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
         with open('./mean_face.txt', 'r') as f_mean_face:
             mean_face = f_mean_face.read()
         self.mean_face = np.asarray(mean_face.split(' '), dtype=np.float32)
         self.det_net = SCRFD('./scrfd_2.5g_kps.onnx', confThreshold=0.1, nmsThreshold=0.5)
 
-        checkpoint = torch.load('./checkpoint_epoch_335.pth.tar')
-        self.pfld_backbone = PFLDInference().cuda()
+        checkpoint = torch.load('./checkpoint_epoch_335.pth.tar', map_location=self.device)
+        self.pfld_backbone = PFLDInference().to(self.device)
         self.pfld_backbone.load_state_dict(checkpoint['pfld_backbone'])
         self.pfld_backbone.eval()
 
@@ -91,13 +92,11 @@ class Landmark:
         # cv2.imshow("cropped", cropped)
         h,w = cropped.shape[:2]
         x1, y1, x2, y2 = boxes_list[0]
-        transform = torchvision.transforms.Compose(
-                [torchvision.transforms.ToTensor()])
         input = cv2.resize(cropped, (192, 192))
         input = np.asarray(input, dtype=np.float32) / 255.0
         input = input.transpose(2,0,1)
         input = torch.from_numpy(input)[None]
-        input = input.cuda()
+        input = input.to(self.device)
         # print(input)
         # asd
 
@@ -112,4 +111,3 @@ class Landmark:
         pre_landmark[:,1] *= h
         pre_landmark = pre_landmark.astype(np.int32)
         return pre_landmark, x1, y1
-        

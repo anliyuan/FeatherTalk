@@ -317,12 +317,5 @@ def main() -> None:
     print(out_path)
 
 
-TinyHubertConfig = FeatherHuBERTConfig
-TinyHubertLikeEncoder = FeatherHuBERTEncoder
-tiny_hubert_config_from_mapping = feather_hubert_config_from_mapping
-load_tiny_hubert = load_feather_hubert
-get_tiny_hubert_from_16k_speech = get_feather_hubert_from_16k_speech
-
-
 if __name__ == "__main__":
     main()

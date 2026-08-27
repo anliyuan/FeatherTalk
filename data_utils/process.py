@@ -6,15 +6,12 @@ import argparse
 import os
 import subprocess
 import sys
-from typing import Dict
-
 import cv2
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# 不同 ASR 后端对应的视频帧率要求
-_REQUIRED_FPS: Dict[str, int] = {"hubert": 25, "wenet": 20}
+_REQUIRED_FPS = 25
 
 
 def extract_audio(video_path: str, wav_path: str, sample_rate: int = 16000) -> None:
@@ -30,20 +27,19 @@ def extract_audio(video_path: str, wav_path: str, sample_rate: int = 16000) -> N
     print("[INFO] ===== extracted audio =====")
 
 
-def _check_fps(video_path: str, mode: str) -> float:
+def _check_fps(video_path: str) -> float:
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
-    required = _REQUIRED_FPS[mode]
-    if fps != required:
+    if fps != _REQUIRED_FPS:
         raise ValueError(
-            f"Using {mode}, your video fps should be {required} (got {fps})!!!"
+            f"FeatherTalk requires a {_REQUIRED_FPS} FPS video (got {fps})"
         )
     return fps
 
 
-def extract_images(video_path: str, mode: str) -> None:
-    _check_fps(video_path, mode)
+def extract_images(video_path: str) -> None:
+    _check_fps(video_path)
 
     base_dir = os.path.dirname(os.path.abspath(video_path))
     full_body_dir = os.path.join(base_dir, "full_body_img")
@@ -62,28 +58,20 @@ def extract_images(video_path: str, mode: str) -> None:
     print(f"[INFO] extracted {counter} frames -> {full_body_dir}")
 
 
-def get_audio_feature(wav_path: str, mode: str, feather_hubert_checkpoint: str = "") -> None:
+def get_audio_feature(wav_path: str, feather_hubert_checkpoint: str) -> None:
     print("extracting audio feature...")
     wav_path_abs = os.path.abspath(wav_path)
     out_path = os.path.join(os.path.dirname(wav_path_abs), "aud_hu.npy")
-    if mode == "wenet":
-        cmd = [sys.executable, "wenet_infer.py", wav_path_abs]
-    elif mode == "hubert":
-        if feather_hubert_checkpoint:
-            cmd = [
-                sys.executable,
-                "feather_hubert/feather_hubert.py",
-                "--wav",
-                wav_path_abs,
-                "--checkpoint",
-                os.path.abspath(feather_hubert_checkpoint),
-                "--out",
-                out_path,
-            ]
-        else:
-            cmd = [sys.executable, "hubert.py", "--wav", wav_path_abs, "--out", out_path]
-    else:
-        raise ValueError(f"Unknown asr mode: {mode}")
+    cmd = [
+        sys.executable,
+        "feather_hubert/feather_hubert.py",
+        "--wav",
+        wav_path_abs,
+        "--checkpoint",
+        os.path.abspath(feather_hubert_checkpoint),
+        "--out",
+        out_path,
+    ]
     # 强制切到 data_utils 目录，保证脚本里相对路径（conf/、scrfd onnx 等）能被解析
     subprocess.run(cmd, check=True, cwd=HERE)
 
@@ -125,16 +113,13 @@ def get_landmark(video_path: str, landmarks_dir: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("path", type=str, help="path to video file")
-    parser.add_argument("--asr", type=str, default="hubert", choices=["wenet", "hubert"])
     parser.add_argument(
         "--feather_hubert_checkpoint",
         type=str,
-        default="",
-        help="optional FeatherHuBERT .pth; used only with --asr hubert and writes aud_hu.npy",
+        required=True,
+        help="FeatherHuBERT checkpoint used to write aud_hu.npy",
     )
     opt = parser.parse_args()
-    if opt.asr != "hubert" and opt.feather_hubert_checkpoint:
-        raise ValueError("--feather_hubert_checkpoint can only be used with --asr hubert")
 
     video_path = os.path.abspath(opt.path)
     base_dir = os.path.dirname(video_path)
@@ -143,9 +128,9 @@ def main() -> None:
     os.makedirs(landmarks_dir, exist_ok=True)
 
     extract_audio(video_path, wav_path)
-    extract_images(video_path, opt.asr)
+    extract_images(video_path)
     get_landmark(video_path, landmarks_dir)
-    get_audio_feature(wav_path, opt.asr, opt.feather_hubert_checkpoint)
+    get_audio_feature(wav_path, opt.feather_hubert_checkpoint)
 
 
 if __name__ == "__main__":

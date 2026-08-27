@@ -19,24 +19,17 @@ import numpy as np
 import torch
 
 
-# 训练 / 推理时，从原图裁出来的人脸区域统一 resize 到 FACE_CROP_SIZE×FACE_CROP_SIZE，
-# 再从中取 FACE_INNER_SIZE×FACE_INNER_SIZE 的内部区域作为网络输入 / 标签；
-# 留下来的边给"贴回原图"时做一个缓冲，避免边缘违和。
-FACE_CROP_SIZE = 168
-FACE_INNER_SIZE = 160
-FACE_BORDER = (FACE_CROP_SIZE - FACE_INNER_SIZE) // 2  # = 4
+# 固定的 144x144 模型协议：先 resize 到 152x152，再取中心 144x144。
+FACE_CROP_SIZE = 152
+FACE_INNER_SIZE = 144
+FACE_BORDER = 4
+GEOMETRY_BASE_SIZE = 160
 
 # 涂黑嘴部矩形 (x, y, w, h)
 MASK_RECT = (5, 5, 150, 145)
 
-# 训练 / 推理时音频上下文半窗口：取当前帧前后各 AUDIO_HALF_WINDOW 帧
-AUDIO_HALF_WINDOW = 4
-
-# UNet 输入的音频特征 reshape 目标形状
-_AUDIO_FEAT_SHAPE = {
-    "wenet": (128, 16, 32),
-    "hubert": (16, 32, 32),
-}
+# 取 [i-10, i+9] 共20个视频帧，每帧对应两个音频 token。
+AUDIO_HALF_WINDOW = 10
 
 
 Bbox = Tuple[int, int, int, int]
@@ -68,22 +61,64 @@ def compute_face_bbox(landmarks: np.ndarray) -> Bbox:
     return xmin, ymin, xmax, ymax
 
 
-def crop_face(img: np.ndarray, bbox: Bbox) -> np.ndarray:
-    """裁切 bbox 区域并 resize 到 FACE_CROP_SIZE。"""
+def crop_face(
+    img: np.ndarray, bbox: Bbox, crop_size: int = FACE_CROP_SIZE
+) -> np.ndarray:
+    """裁切 bbox 区域并 resize 到指定的正方形尺寸。"""
     xmin, ymin, xmax, ymax = bbox
     region = img[ymin:ymax, xmin:xmax]
-    return cv2.resize(region, (FACE_CROP_SIZE, FACE_CROP_SIZE), interpolation=cv2.INTER_AREA)
+    return cv2.resize(region, (crop_size, crop_size), interpolation=cv2.INTER_AREA)
 
 
-def extract_inner(face_crop: np.ndarray) -> np.ndarray:
-    """从 FACE_CROP_SIZE 大小的 crop 中取中心的 FACE_INNER_SIZE 部分。"""
-    b = FACE_BORDER
-    return face_crop[b:b + FACE_INNER_SIZE, b:b + FACE_INNER_SIZE].copy()
+def extract_inner(
+    face_crop: np.ndarray, inner_size: int = FACE_INNER_SIZE
+) -> np.ndarray:
+    """从正方形 crop 中取中心的指定尺寸区域。"""
+    border = (face_crop.shape[0] - inner_size) // 2
+    return face_crop[border:border + inner_size, border:border + inner_size].copy()
 
 
-def mask_mouth(img: np.ndarray) -> np.ndarray:
-    """把 FACE_INNER_SIZE 大小的人脸图嘴部矩形区域涂黑（原地修改并返回）。"""
-    return cv2.rectangle(img, MASK_RECT, (0, 0, 0), -1)
+def mask_mouth(img: np.ndarray, inner_size: int = FACE_INNER_SIZE) -> np.ndarray:
+    """把指定尺寸的人脸图嘴部区域按比例涂黑（原地修改并返回）。"""
+    scale = inner_size / float(GEOMETRY_BASE_SIZE)
+    x, y, width, height = MASK_RECT
+    rect = (
+        round(x * scale),
+        round(y * scale),
+        round(width * scale),
+        round(height * scale),
+    )
+    return cv2.rectangle(img, rect, (0, 0, 0), -1)
+
+
+def mouth_soft_blend_mask(image_size: int = FACE_INNER_SIZE) -> torch.Tensor:
+    """Return a tighter feathered mask around the moving mouth region.
+
+    The mask keeps generated pixels around the moving mouth and preserves the
+    current resource frame around the cheeks, chin and crop boundary.
+    """
+    yy, xx = np.mgrid[0:image_size, 0:image_size].astype(np.float32)
+    nx = (xx + 0.5) / float(image_size)
+    ny = (yy + 0.5) / float(image_size)
+    dx = (nx - 0.5) / 0.46
+    dy = (ny - 0.37) / 0.34
+    radius = np.sqrt(dx * dx + dy * dy)
+    edge_t = np.clip((radius - 0.82) / (1.0 - 0.82), 0.0, 1.0)
+    alpha = 1.0 - edge_t * edge_t * (3.0 - 2.0 * edge_t)
+    return torch.from_numpy(alpha[None].astype(np.float32))
+
+
+def mouth_fill_mask(image_size: int = FACE_INNER_SIZE) -> torch.Tensor:
+    """Return the hard mouth input rectangle used for base-frame filling."""
+    scale = image_size / float(GEOMETRY_BASE_SIZE)
+    x, y, width, height = MASK_RECT
+    x1 = round(x * scale)
+    y1 = round(y * scale)
+    x2 = min(image_size, x1 + round(width * scale))
+    y2 = min(image_size, y1 + round(height * scale))
+    mask = np.zeros((1, image_size, image_size), dtype=np.float32)
+    mask[:, y1:y2, x1:x2] = 1.0
+    return torch.from_numpy(mask)
 
 
 def hwc_to_chw_tensor(img_hwc: np.ndarray) -> torch.Tensor:
@@ -109,25 +144,39 @@ def gather_audio_window(
     right = min(features.shape[0], right)
     auds = torch.from_numpy(features[left:right])
     if pad_left > 0:
-        auds = torch.cat([torch.zeros_like(auds[:pad_left]), auds], dim=0)
+        padding = torch.zeros(
+            (pad_left, *features.shape[1:]), dtype=auds.dtype
+        )
+        auds = torch.cat([padding, auds], dim=0)
     if pad_right > 0:
-        auds = torch.cat([auds, torch.zeros_like(auds[:pad_right])], dim=0)
+        padding = torch.zeros(
+            (pad_right, *features.shape[1:]), dtype=auds.dtype
+        )
+        auds = torch.cat([auds, padding], dim=0)
     return auds
 
 
-def reshape_audio_feat(audio_feat: torch.Tensor, mode: str) -> torch.Tensor:
-    """根据 ASR 模式 reshape 音频特征到 UNet 期望的形状。"""
-    if mode not in _AUDIO_FEAT_SHAPE:
-        raise ValueError(f"Unknown asr mode: {mode}")
-    return audio_feat.reshape(*_AUDIO_FEAT_SHAPE[mode])
+def reshape_audio_feat(
+    audio_feat: torch.Tensor,
+    mode: str = "hubert",
+    raw_hubert: bool = True,
+) -> torch.Tensor:
+    """Convert 20 video-frame features into ``[40, 1024]`` tokens."""
+    if mode != "hubert" or not raw_hubert:
+        raise ValueError("FeatherTalk requires HuBERT-compatible raw features")
+    if audio_feat.ndim != 3 or audio_feat.shape[-2:] != (2, 1024):
+        raise ValueError("audio features must have shape [frames, 2, 1024]")
+    return audio_feat.reshape(-1, 1024).contiguous()
 
 
 def count_jpgs(dir_path: str) -> int:
     return sum(1 for f in os.listdir(dir_path) if f.endswith(".jpg"))
 
 
-def load_face_crop(img_path: str, lms_path: str) -> np.ndarray:
+def load_face_crop(
+    img_path: str, lms_path: str, crop_size: int = FACE_CROP_SIZE
+) -> np.ndarray:
     """便捷函数：读图 + 读关键点 + 算 bbox + 裁切，返回 FACE_CROP_SIZE 大小的 crop。"""
     img = cv2.imread(img_path)
     bbox = compute_face_bbox(read_landmarks(lms_path))
-    return crop_face(img, bbox)
+    return crop_face(img, bbox, crop_size=crop_size)

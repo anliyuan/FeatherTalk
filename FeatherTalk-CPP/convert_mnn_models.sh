@@ -10,7 +10,7 @@ if [[ ! -x "${CONVERTER}" ]]; then
   echo "MNNConvert is missing. Run ./setup_mnn_macos.sh first." >&2
   exit 1
 fi
-if [[ ! -f "${MODEL_DIR}/feather_hubert.onnx" || ! -f "${MODEL_DIR}/unet_hubert.onnx" ]]; then
+if [[ ! -f "${MODEL_DIR}/feather_hubert.onnx" || ! -f "${MODEL_DIR}/feathertalk_144.onnx" ]]; then
   echo "ONNX models are missing. Run tools/export_models.py first." >&2
   exit 1
 fi
@@ -22,10 +22,10 @@ export DYLD_LIBRARY_PATH="${MNN_BUILD_DIR}:${MNN_BUILD_DIR}/tools/converter${DYL
   --fp16 \
   --bizCode FeatherTalk
 "${CONVERTER}" -f ONNX \
-  --modelFile "${MODEL_DIR}/unet_hubert.onnx" \
-  --MNNModel "${MODEL_DIR}/unet_hubert.mnn" \
+  --modelFile "${MODEL_DIR}/feathertalk_144.onnx" \
+  --MNNModel "${MODEL_DIR}/feathertalk_144_fp16.mnn" \
   --fp16 \
   --bizCode FeatherTalk
 
 echo "[convert] ${MODEL_DIR}/feather_hubert.mnn"
-echo "[convert] ${MODEL_DIR}/unet_hubert.mnn"
+echo "[convert] ${MODEL_DIR}/feathertalk_144_fp16.mnn"

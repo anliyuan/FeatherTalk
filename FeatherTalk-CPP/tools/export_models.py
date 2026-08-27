@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Export the released FeatherTalk inference checkpoints to ONNX.
-
-The generated models use the exact interfaces consumed by the C++ runner:
-  FeatherHuBERT: [1, samples] -> [1, tokens, 1024]
-  UNet:          [1, 6, 160, 160], [1, 16, 32, 32] -> [1, 3, 160, 160]
-"""
+"""Export FeatherHuBERT and the released 144x144 model to ONNX."""
 
 from __future__ import annotations
 
@@ -20,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from data_utils.feather_hubert.feather_hubert import load_feather_hubert
-from model_factory import create_model, load_checkpoint_state
+from model import AUDIO_FEATURE_DIM, AUDIO_TOKENS, IMAGE_SIZE, Model, load_checkpoint_state
 
 
 def export_feather(checkpoint: Path, output: Path, opset: int) -> None:
@@ -41,11 +36,11 @@ def export_feather(checkpoint: Path, output: Path, opset: int) -> None:
     print(f"[export] FeatherHuBERT -> {output}")
 
 
-def export_unet(checkpoint: Path, output: Path, opset: int) -> None:
-    model = create_model("hubert", "original").eval()
-    model.load_state_dict(load_checkpoint_state(str(checkpoint), torch.device("cpu")))
-    image = torch.zeros((1, 6, 160, 160), dtype=torch.float32)
-    audio = torch.zeros((1, 16, 32, 32), dtype=torch.float32)
+def export_visual(checkpoint: Path, output: Path, opset: int) -> None:
+    model = Model().eval()
+    model.load_state_dict(load_checkpoint_state(str(checkpoint)))
+    image = torch.zeros((1, 6, IMAGE_SIZE, IMAGE_SIZE), dtype=torch.float32)
+    audio = torch.zeros((1, AUDIO_TOKENS, AUDIO_FEATURE_DIM), dtype=torch.float32)
     torch.onnx.export(
         model,
         (image, audio),
@@ -57,22 +52,26 @@ def export_unet(checkpoint: Path, output: Path, opset: int) -> None:
         dynamo=False,
     )
     onnx.checker.check_model(str(output))
-    print(f"[export] FeatherTalk UNet -> {output}")
+    print(f"[export] FeatherTalk visual model -> {output}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--feather-checkpoint", type=Path, required=True)
-    parser.add_argument("--unet-checkpoint", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "FeatherTalk-CPP" / "models")
+    parser.add_argument("--visual-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--output-dir", type=Path, default=ROOT / "FeatherTalk-CPP" / "models"
+    )
     parser.add_argument("--opset", type=int, default=17)
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    feather_output = args.output_dir / "feather_hubert.onnx"
-    unet_output = args.output_dir / "unet_hubert.onnx"
-    export_feather(args.feather_checkpoint, feather_output, args.opset)
-    export_unet(args.unet_checkpoint, unet_output, args.opset)
+    export_feather(
+        args.feather_checkpoint, args.output_dir / "feather_hubert.onnx", args.opset
+    )
+    export_visual(
+        args.visual_checkpoint, args.output_dir / "feathertalk_144.onnx", args.opset
+    )
 
 
 if __name__ == "__main__":

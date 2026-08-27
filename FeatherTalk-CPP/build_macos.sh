@@ -26,6 +26,7 @@ mkdir -p "${OUT_DIR}"
   -isysroot "${SDK_DIR}" \
   -isystem "${SDK_DIR}/usr/include/c++/v1" \
   -I"${MNN_DIR}/include" \
+  -I"${ROOT_DIR}/include" \
   -I"${ROOT_DIR}/third_party/stb" \
   "${ROOT_DIR}/src/main.cc" \
   -L"${MNN_BUILD_DIR}" -lMNN \

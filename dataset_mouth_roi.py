@@ -13,8 +13,8 @@ from torch.utils.data import Dataset
 
 from face_utils import (
     FACE_BORDER,
-    FACE_CROP_SIZE,
     FACE_INNER_SIZE,
+    GEOMETRY_BASE_SIZE,
     compute_face_bbox,
     count_jpgs,
     extract_inner,
@@ -27,10 +27,7 @@ from face_utils import (
 )
 
 
-_AUDIO_FEAT_FILE = {
-    "wenet": "aud_wenet.npy",
-    "hubert": "aud_hu.npy",
-}
+_AUDIO_FEAT_FILE = "aud_hu.npy"
 
 
 @dataclass(frozen=True)
@@ -44,10 +41,15 @@ class MouthRoiConfig:
     pad: int = 2
 
 
-def _project_mouth_points_to_inner(landmarks: np.ndarray, config: MouthRoiConfig) -> np.ndarray:
+def _project_mouth_points_to_inner(
+    landmarks: np.ndarray,
+    config: MouthRoiConfig,
+    image_size: int = FACE_INNER_SIZE,
+) -> np.ndarray:
     bbox = compute_face_bbox(landmarks)
     xmin, ymin, xmax, _ = bbox
-    scale = FACE_CROP_SIZE / float(xmax - xmin)
+    crop_size = image_size + 2 * FACE_BORDER
+    scale = crop_size / float(xmax - xmin)
 
     points = landmarks[config.start:config.end].astype(np.float32).copy()
     points[:, 0] = (points[:, 0] - xmin) * scale - FACE_BORDER
@@ -55,40 +57,60 @@ def _project_mouth_points_to_inner(landmarks: np.ndarray, config: MouthRoiConfig
     return points
 
 
-def mouth_roi_from_landmarks(landmarks: np.ndarray, config: MouthRoiConfig) -> tuple[int, int, int, int]:
-    points = _project_mouth_points_to_inner(landmarks, config)
+def mouth_roi_from_landmarks(
+    landmarks: np.ndarray,
+    config: MouthRoiConfig,
+    image_size: int = FACE_INNER_SIZE,
+) -> tuple[int, int, int, int]:
+    points = _project_mouth_points_to_inner(landmarks, config, image_size=image_size)
     x1, y1 = points.min(axis=0)
     x2, y2 = points.max(axis=0)
     cx = (x1 + x2) / 2.0
     cy = (y1 + y2) / 2.0
-    width = max((x2 - x1 + 2 * config.pad) * config.expand_x, float(config.min_w))
-    height = max((y2 - y1 + 2 * config.pad) * config.expand_y, float(config.min_h))
+    size_scale = image_size / float(GEOMETRY_BASE_SIZE)
+    pad = config.pad * size_scale
+    min_w = config.min_w * size_scale
+    min_h = config.min_h * size_scale
+    width = max((x2 - x1 + 2 * pad) * config.expand_x, min_w)
+    height = max((y2 - y1 + 2 * pad) * config.expand_y, min_h)
 
     rx1 = int(round(cx - width / 2.0))
     rx2 = int(round(cx + width / 2.0))
     ry1 = int(round(cy - height / 2.0))
     ry2 = int(round(cy + height / 2.0))
 
-    rx1 = max(0, min(FACE_INNER_SIZE - 1, rx1))
-    ry1 = max(0, min(FACE_INNER_SIZE - 1, ry1))
-    rx2 = max(rx1 + 1, min(FACE_INNER_SIZE, rx2))
-    ry2 = max(ry1 + 1, min(FACE_INNER_SIZE, ry2))
+    rx1 = max(0, min(image_size - 1, rx1))
+    ry1 = max(0, min(image_size - 1, ry1))
+    rx2 = max(rx1 + 1, min(image_size, rx2))
+    ry2 = max(ry1 + 1, min(image_size, ry2))
     return rx1, ry1, rx2, ry2
 
 
-def mouth_mask_from_landmarks(landmarks: np.ndarray, config: MouthRoiConfig) -> torch.Tensor:
-    x1, y1, x2, y2 = mouth_roi_from_landmarks(landmarks, config)
-    mask = np.zeros((1, FACE_INNER_SIZE, FACE_INNER_SIZE), dtype=np.float32)
+def mouth_mask_from_landmarks(
+    landmarks: np.ndarray,
+    config: MouthRoiConfig,
+    image_size: int = FACE_INNER_SIZE,
+) -> torch.Tensor:
+    x1, y1, x2, y2 = mouth_roi_from_landmarks(
+        landmarks, config, image_size=image_size
+    )
+    mask = np.zeros((1, image_size, image_size), dtype=np.float32)
     mask[:, y1:y2, x1:x2] = 1.0
     return torch.from_numpy(mask)
 
 
 class MouthRoiDataset(Dataset):
-    def __init__(self, dataset_dir: str, mode: str, mouth_config: MouthRoiConfig | None = None):
-        if mode not in _AUDIO_FEAT_FILE:
-            raise ValueError(f"Unknown asr mode: {mode}")
-        self.mode = mode
+    def __init__(
+        self,
+        dataset_dir: str,
+        mouth_config: MouthRoiConfig | None = None,
+        image_size: int = FACE_INNER_SIZE,
+    ):
         self.mouth_config = mouth_config or MouthRoiConfig()
+        if image_size != FACE_INNER_SIZE:
+            raise ValueError(f"image_size must be {FACE_INNER_SIZE}")
+        self.image_size = image_size
+        self.crop_size = image_size + 2 * FACE_BORDER
 
         full_body_dir = os.path.join(dataset_dir, "full_body_img")
         landmarks_dir = os.path.join(dataset_dir, "landmarks")
@@ -96,19 +118,25 @@ class MouthRoiDataset(Dataset):
         self.img_path_list = [os.path.join(full_body_dir, f"{i}.jpg") for i in range(n_frames)]
         self.lms_path_list = [os.path.join(landmarks_dir, f"{i}.lms") for i in range(n_frames)]
 
-        audio_feats_path = os.path.join(dataset_dir, _AUDIO_FEAT_FILE[mode])
+        audio_feats_path = os.path.join(dataset_dir, _AUDIO_FEAT_FILE)
         self.audio_feats = np.load(audio_feats_path).astype(np.float32)
 
     def __len__(self) -> int:
         return min(self.audio_feats.shape[0], len(self.img_path_list))
 
     def _build_target_masked_and_mouth(self, idx: int):
-        face_crop = load_face_crop(self.img_path_list[idx], self.lms_path_list[idx])
-        inner = extract_inner(face_crop)
+        face_crop = load_face_crop(
+            self.img_path_list[idx],
+            self.lms_path_list[idx],
+            crop_size=self.crop_size,
+        )
+        inner = extract_inner(face_crop, inner_size=self.image_size)
         target_T = hwc_to_chw_tensor(inner.copy())
-        masked_T = hwc_to_chw_tensor(mask_mouth(inner))
+        masked_T = hwc_to_chw_tensor(mask_mouth(inner, inner_size=self.image_size))
         landmarks = read_landmarks(self.lms_path_list[idx])
-        mouth_mask_T = mouth_mask_from_landmarks(landmarks, self.mouth_config)
+        mouth_mask_T = mouth_mask_from_landmarks(
+            landmarks, self.mouth_config, image_size=self.image_size
+        )
         return target_T, masked_T, mouth_mask_T
 
     def _build_reference(self) -> torch.Tensor:
@@ -116,17 +144,25 @@ class MouthRoiDataset(Dataset):
         return self._build_reference_at(ref_idx)
 
     def _build_reference_at(self, ref_idx: int) -> torch.Tensor:
-        face_crop = load_face_crop(self.img_path_list[ref_idx], self.lms_path_list[ref_idx])
-        return hwc_to_chw_tensor(extract_inner(face_crop))
+        face_crop = load_face_crop(
+            self.img_path_list[ref_idx],
+            self.lms_path_list[ref_idx],
+            crop_size=self.crop_size,
+        )
+        return hwc_to_chw_tensor(
+            extract_inner(face_crop, inner_size=self.image_size)
+        )
 
     def _build_frame(self, idx: int, ref_T: torch.Tensor | None = None):
         target_T, masked_T, mouth_mask_T = self._build_target_masked_and_mouth(idx)
-        ref_T = ref_T if ref_T is not None else self._build_reference()
+        if ref_T is None:
+            ref_T = self._build_reference()
         img_concat_T = torch.cat([ref_T, masked_T], dim=0)
 
-        audio_feat = gather_audio_window(self.audio_feats, idx)
-        audio_feat = reshape_audio_feat(audio_feat, self.mode)
-
+        audio_feat = gather_audio_window(
+            self.audio_feats, idx
+        )
+        audio_feat = reshape_audio_feat(audio_feat)
         return img_concat_T, target_T, audio_feat, mouth_mask_T
 
     def __getitem__(self, idx: int):
@@ -143,11 +179,15 @@ class TemporalMouthRoiDataset(MouthRoiDataset):
     def __init__(
         self,
         dataset_dir: str,
-        mode: str,
         mouth_config: MouthRoiConfig | None = None,
         temporal_stride: int = 1,
+        image_size: int = FACE_INNER_SIZE,
     ):
-        super().__init__(dataset_dir, mode, mouth_config=mouth_config)
+        super().__init__(
+            dataset_dir,
+            mouth_config=mouth_config,
+            image_size=image_size,
+        )
         if temporal_stride < 1:
             raise ValueError("temporal_stride must be >= 1")
         self.temporal_stride = temporal_stride

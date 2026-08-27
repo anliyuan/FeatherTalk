@@ -2,6 +2,8 @@
 #include <MNN/Interpreter.hpp>
 #include <MNN/Tensor.hpp>
 
+#include "feathertalk_api.h"
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -9,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -19,6 +22,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -36,10 +40,10 @@ namespace {
 constexpr int kSampleRate = 16000;
 constexpr int kFeatureDim = 1024;
 constexpr int kTokensPerFrame = 2;
-constexpr int kAudioWindowFrames = 8;
-constexpr int kAudioHalfWindow = 4;
-constexpr int kFaceCropSize = 168;
-constexpr int kFaceInnerSize = 160;
+constexpr int kAudioWindowFrames = 20;
+constexpr int kAudioHalfWindow = 10;
+constexpr int kFaceCropSize = 152;
+constexpr int kFaceInnerSize = 144;
 constexpr int kFaceBorder = 4;
 constexpr int kOutputFps = 25;
 
@@ -54,7 +58,26 @@ struct Args {
   int threads = 4;
   std::string backend = "metal";
   std::string precision = "high";
+  int video_crf = 18;
+  bool profile = false;
 };
+
+struct FaceGeometry {
+  int crop_size;
+  int inner_size;
+  int border;
+  int mask_left;
+  int mask_top;
+  int mask_right;
+  int mask_bottom;
+  int audio_window_frames;
+  int audio_half_window;
+};
+
+FaceGeometry FeatherTalkGeometry() {
+  return {kFaceCropSize, kFaceInnerSize, kFaceBorder, 4, 4, 139, 134,
+          kAudioWindowFrames, kAudioHalfWindow};
+}
 
 struct Image {
   int width = 0;
@@ -83,6 +106,23 @@ struct WavData {
   std::vector<float> samples;
 };
 
+struct TensorView {
+  const float* data = nullptr;
+  size_t size = 0;
+};
+
+struct VisualTimings {
+  double resource_ms = 0.0;
+  double model_ms = 0.0;
+  size_t frames = 0;
+};
+
+using SteadyClock = std::chrono::steady_clock;
+
+double Milliseconds(SteadyClock::time_point begin, SteadyClock::time_point end) {
+  return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
 std::string ToLower(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
     return static_cast<char>(std::tolower(c));
@@ -97,7 +137,7 @@ void PrintUsage() {
       << "FeatherTalk C++ offline inference\n\n"
       << "Required:\n"
       << "  --feather-model PATH   FeatherHuBERT model ([1, samples] -> [1, T, 1024])\n"
-      << "  --unet-model PATH      FeatherTalk UNet model\n"
+      << "  --unet-model PATH      FeatherTalk 144x144 visual model\n"
       << "  --dataset PATH         Directory with full_body_img/ and landmarks/\n"
       << "  --audio PATH           16 kHz PCM/float WAV\n"
       << "  --output PATH          Output MP4 path\n\n"
@@ -106,7 +146,9 @@ void PrintUsage() {
       << "  --max-frames N         Render only the first N frames (0 means all)\n"
       << "  --threads N            CPU thread count (default: 4)\n"
       << "  --backend cpu|metal|opencl  MNN backend (default: metal)\n"
-      << "  --precision high|normal|low  MNN precision (default: high)\n";
+      << "  --precision high|normal|low  MNN precision (default: high)\n"
+      << "  --video-crf N          H.264 CRF quality, 0--51 (default: 18)\n"
+      << "  --profile              Print per-frame input/model timings\n";
 }
 
 Args ParseArgs(int argc, char** argv) {
@@ -116,6 +158,10 @@ Args ParseArgs(int argc, char** argv) {
     if (key == "--help" || key == "-h") {
       PrintUsage();
       std::exit(0);
+    }
+    if (key == "--profile") {
+      args.profile = true;
+      continue;
     }
     if (!IsFlag(key) || i + 1 >= argc) {
       throw std::runtime_error("Invalid argument: " + key);
@@ -141,13 +187,15 @@ Args ParseArgs(int argc, char** argv) {
       args.backend = value;
     } else if (key == "--precision") {
       args.precision = value;
+    } else if (key == "--video-crf") {
+      args.video_crf = std::stoi(value);
     } else {
       throw std::runtime_error("Unknown option: " + key);
     }
   }
 
-  if (args.feather_model.empty() || args.unet_model.empty() || args.dataset.empty() ||
-      args.audio.empty() || args.output.empty()) {
+  if (args.feather_model.empty() || args.unet_model.empty() ||
+      args.dataset.empty() || args.audio.empty() || args.output.empty()) {
     PrintUsage();
     throw std::runtime_error("All required arguments must be provided.");
   }
@@ -159,6 +207,9 @@ Args ParseArgs(int argc, char** argv) {
   }
   if (args.precision != "high" && args.precision != "normal" && args.precision != "low") {
     throw std::runtime_error("--precision must be high, normal, or low.");
+  }
+  if (args.video_crf < 0 || args.video_crf > 51) {
+    throw std::runtime_error("--video-crf must be between 0 and 51.");
   }
   return args;
 }
@@ -461,15 +512,14 @@ class MnnModel {
     session_ = interpreter_->createSession(config);
     if (session_ == nullptr) throw std::runtime_error("Unable to create MNN session.");
 
-    int active_backend = -1;
-    if (!interpreter_->getSessionInfo(session_, MNN::Interpreter::BACKENDS, &active_backend)) {
+    if (!interpreter_->getSessionInfo(session_, MNN::Interpreter::BACKENDS, &active_backend_)) {
       throw std::runtime_error("Unable to inspect the active MNN backend.");
     }
     const bool cpu_extension = config.type == MNN_FORWARD_CPU &&
-                               active_backend == MNN_FORWARD_CPU_EXTENSION;
-    if (active_backend != config.type && !cpu_extension) {
+                               active_backend_ == MNN_FORWARD_CPU_EXTENSION;
+    if (active_backend_ != config.type && !cpu_extension) {
       throw std::runtime_error("MNN requested " + args.backend + " but activated backend " +
-                               std::to_string(active_backend));
+                               std::to_string(active_backend_));
     }
     for (const auto& name : input_names_) {
       MNN::Tensor* input = interpreter_->getSessionInput(session_, name.c_str());
@@ -483,13 +533,17 @@ class MnnModel {
   std::vector<float> RunSingle(const std::vector<float>& values,
                                const std::vector<int64_t>& shape,
                                std::vector<int64_t>* output_shape) {
-    return Run({&values}, {ToMnnShape(shape)}, output_shape);
+    return Run({{values.data(), values.size()}},
+               {ToMnnShape(shape)}, output_shape);
   }
 
   std::vector<float> RunUnet(const std::vector<float>& image,
                              const std::vector<float>& audio,
+                             int face_inner_size,
                              std::vector<int64_t>* output_shape) {
-    return Run({&image, &audio}, {{1, 6, kFaceInnerSize, kFaceInnerSize}, {1, 16, 32, 32}}, output_shape);
+    const std::vector<int> audio_shape = {1, 40, 1024};
+    return Run({{image.data(), image.size()}, {audio.data(), audio.size()}},
+               {{1, 6, face_inner_size, face_inner_size}, audio_shape}, output_shape);
   }
 
  private:
@@ -502,7 +556,7 @@ class MnnModel {
     return result;
   }
 
-  std::vector<float> Run(const std::vector<const std::vector<float>*>& values,
+  std::vector<float> Run(const std::vector<TensorView>& values,
                          const std::vector<std::vector<int>>& shapes,
                          std::vector<int64_t>* output_shape) {
     if (values.size() != inputs_.size() || shapes.size() != inputs_.size()) {
@@ -514,17 +568,20 @@ class MnnModel {
       input_shapes_ = shapes;
     }
 
-    std::vector<TensorPtr> host_inputs;
-    host_inputs.reserve(inputs_.size());
     for (size_t i = 0; i < inputs_.size(); ++i) {
-      auto host = TensorPtr(MNN::Tensor::create<float>(shapes[i],
-                                                        const_cast<float*>(values[i]->data()),
-                                                        MNN::Tensor::CAFFE),
+      const size_t expected_elements = std::accumulate(
+          shapes[i].begin(), shapes[i].end(), size_t{1},
+          [](size_t product, int dimension) { return product * static_cast<size_t>(dimension); });
+      if (values[i].data == nullptr || values[i].size != expected_elements) {
+        throw std::runtime_error("MNN input data size does not match its tensor shape.");
+      }
+      auto host = TensorPtr(MNN::Tensor::create<float>(
+                                shapes[i], const_cast<float*>(values[i].data),
+                                MNN::Tensor::CAFFE),
                             MNN::Tensor::destroy);
       if (host == nullptr || !inputs_[i]->copyFromHostTensor(host.get())) {
         throw std::runtime_error("Unable to copy MNN input tensor.");
       }
-      host_inputs.push_back(std::move(host));
     }
     const MNN::ErrorCode code = interpreter_->runSession(session_);
     if (code != MNN::NO_ERROR) throw std::runtime_error("MNN inference failed with error code " + std::to_string(code));
@@ -545,6 +602,7 @@ class MnnModel {
   std::string output_name_;
   std::vector<MNN::Tensor*> inputs_;
   MNN::Tensor* output_ = nullptr;
+  int active_backend_ = -1;
   std::vector<std::vector<int>> input_shapes_;
 };
 
@@ -562,11 +620,13 @@ std::vector<float> ExtractFeatherFeatures(MnnModel& encoder, std::vector<float> 
   return {output.begin(), output.begin() + token_count * kFeatureDim};
 }
 
-std::vector<float> GatherAudioWindow(const std::vector<float>& features, int video_frame) {
+std::vector<float> GatherAudioWindow(
+    const std::vector<float>& features, int video_frame, const FaceGeometry& geometry) {
   const int total_frames = static_cast<int>(features.size() / (kTokensPerFrame * kFeatureDim));
-  std::vector<float> window(kAudioWindowFrames * kTokensPerFrame * kFeatureDim, 0.0F);
-  for (int window_frame = 0; window_frame < kAudioWindowFrames; ++window_frame) {
-    const int source_frame = video_frame - kAudioHalfWindow + window_frame;
+  std::vector<float> window(
+      geometry.audio_window_frames * kTokensPerFrame * kFeatureDim, 0.0F);
+  for (int window_frame = 0; window_frame < geometry.audio_window_frames; ++window_frame) {
+    const int source_frame = video_frame - geometry.audio_half_window + window_frame;
     if (source_frame < 0 || source_frame >= total_frames) continue;
     const size_t source = static_cast<size_t>(source_frame) * kTokensPerFrame * kFeatureDim;
     const size_t destination = static_cast<size_t>(window_frame) * kTokensPerFrame * kFeatureDim;
@@ -575,20 +635,30 @@ std::vector<float> GatherAudioWindow(const std::vector<float>& features, int vid
   return window;
 }
 
-std::vector<float> BuildImageInput(const Image& face_crop) {
-  if (face_crop.width != kFaceCropSize || face_crop.height != kFaceCropSize) {
-    throw std::runtime_error("Face crop must be 168x168.");
+std::vector<float> BuildImageInput(const Image& reference_crop,
+                                   const Image& current_crop,
+                                   const FaceGeometry& geometry) {
+  if (reference_crop.width != geometry.crop_size ||
+      reference_crop.height != geometry.crop_size ||
+      current_crop.width != geometry.crop_size ||
+      current_crop.height != geometry.crop_size) {
+    throw std::runtime_error("Face crop does not match the selected UNet variant.");
   }
-  constexpr int kPlane = kFaceInnerSize * kFaceInnerSize;
+  const int kPlane = geometry.inner_size * geometry.inner_size;
   std::vector<float> input(6 * kPlane, 0.0F);
-  for (int y = 0; y < kFaceInnerSize; ++y) {
-    for (int x = 0; x < kFaceInnerSize; ++x) {
-      const uint8_t* pixel = face_crop.Pixel(x + kFaceBorder, y + kFaceBorder);
-      const bool masked = x >= 5 && x < 155 && y >= 5 && y < 150;
-      const int offset = y * kFaceInnerSize + x;
+  for (int y = 0; y < geometry.inner_size; ++y) {
+    for (int x = 0; x < geometry.inner_size; ++x) {
+      const uint8_t* reference_pixel =
+          reference_crop.Pixel(x + geometry.border, y + geometry.border);
+      const uint8_t* current_pixel =
+          current_crop.Pixel(x + geometry.border, y + geometry.border);
+      const bool masked = x >= geometry.mask_left && x < geometry.mask_right &&
+                          y >= geometry.mask_top && y < geometry.mask_bottom;
+      const int offset = y * geometry.inner_size + x;
       for (int c = 0; c < 3; ++c) {
-        input[c * kPlane + offset] = pixel[c] / 255.0F;
-        input[(c + 3) * kPlane + offset] = masked ? 0.0F : pixel[c] / 255.0F;
+        input[c * kPlane + offset] = reference_pixel[c] / 255.0F;
+        input[(c + 3) * kPlane + offset] =
+            masked ? 0.0F : current_pixel[c] / 255.0F;
       }
     }
   }
@@ -600,29 +670,70 @@ uint8_t ToByte(float value) {
   return static_cast<uint8_t>(std::lround(scaled));
 }
 
-Image RenderFrame(MnnModel& unet,
-                  Image image,
-                  const Bbox& bbox,
-                  const std::vector<float>& audio_window) {
-  Image face_crop = ResizeBilinear(CropImage(image, bbox), kFaceCropSize, kFaceCropSize);
-  const std::vector<float> image_input = BuildImageInput(face_crop);
-  std::vector<int64_t> output_shape;
-  const std::vector<float> prediction = unet.RunUnet(image_input, audio_window, &output_shape);
-  if (output_shape != std::vector<int64_t>({1, 3, kFaceInnerSize, kFaceInnerSize})) {
-    throw std::runtime_error("Expected UNet output [1, 3, 160, 160].");
+float SmoothStep(float edge0, float edge1, float value) {
+  const float t = std::clamp((value - edge0) / (edge1 - edge0), 0.0F, 1.0F);
+  return t * t * (3.0F - 2.0F * t);
+}
+
+float MouthGeneratedAlpha(int x, int y, int size) {
+  const float nx = (static_cast<float>(x) + 0.5F) / size;
+  const float ny = (static_cast<float>(y) + 0.5F) / size;
+  const float dx = (nx - 0.5F) / 0.46F;
+  const float dy = (ny - 0.37F) / 0.34F;
+  const float radius = std::sqrt(dx * dx + dy * dy);
+  return 1.0F - SmoothStep(0.82F, 1.0F, radius);
+}
+
+Image CompositePrediction(Image image,
+                          const Bbox& bbox,
+                          Image face_crop,
+                          const std::vector<float>& prediction,
+                          const std::vector<int64_t>& output_shape,
+                          const FaceGeometry& geometry) {
+  if (output_shape != std::vector<int64_t>({1, 3, geometry.inner_size, geometry.inner_size})) {
+    throw std::runtime_error("Visual model output does not match the selected UNet variant.");
   }
-  constexpr int kPlane = kFaceInnerSize * kFaceInnerSize;
-  for (int y = 0; y < kFaceInnerSize; ++y) {
-    for (int x = 0; x < kFaceInnerSize; ++x) {
-      uint8_t* pixel = face_crop.Pixel(x + kFaceBorder, y + kFaceBorder);
-      const int offset = y * kFaceInnerSize + x;
-      pixel[0] = ToByte(prediction[offset]);
-      pixel[1] = ToByte(prediction[kPlane + offset]);
-      pixel[2] = ToByte(prediction[2 * kPlane + offset]);
+  const int kPlane = geometry.inner_size * geometry.inner_size;
+  for (int y = 0; y < geometry.inner_size; ++y) {
+    for (int x = 0; x < geometry.inner_size; ++x) {
+      uint8_t* pixel = face_crop.Pixel(x + geometry.border, y + geometry.border);
+      const int offset = y * geometry.inner_size + x;
+      const float generated_alpha = MouthGeneratedAlpha(x, y, geometry.inner_size);
+      for (int channel = 0; channel < 3; ++channel) {
+      const float generated = static_cast<float>(
+            ToByte(prediction[channel * kPlane + offset]));
+      const float original = static_cast<float>(pixel[channel]);
+      pixel[channel] = static_cast<uint8_t>(std::lround(
+          generated * generated_alpha + original * (1.0F - generated_alpha)));
+      }
     }
   }
   PasteImage(&image, ResizeBilinear(face_crop, bbox.width, bbox.height), bbox.x, bbox.y);
   return image;
+}
+
+Image RenderFrame(MnnModel& unet,
+                  Image image,
+                  const Bbox& bbox,
+                  const std::vector<float>& audio_window,
+                  const FaceGeometry& geometry,
+                  VisualTimings* timings) {
+  Image current_crop = ResizeBilinear(CropImage(image, bbox), geometry.crop_size, geometry.crop_size);
+  Image face_crop = current_crop;
+  const auto resource_begin = SteadyClock::now();
+  const std::vector<float> image_input = BuildImageInput(face_crop, current_crop, geometry);
+  const auto model_begin = SteadyClock::now();
+  std::vector<int64_t> output_shape;
+  const std::vector<float> prediction = unet.RunUnet(
+      image_input, audio_window, geometry.inner_size, &output_shape);
+  const auto model_end = SteadyClock::now();
+  if (timings != nullptr) {
+    timings->resource_ms += Milliseconds(resource_begin, model_begin);
+    timings->model_ms += Milliseconds(model_begin, model_end);
+    ++timings->frames;
+  }
+  return CompositePrediction(
+      std::move(image), bbox, std::move(face_crop), prediction, output_shape, geometry);
 }
 
 std::string ShellQuote(const fs::path& path) {
@@ -642,7 +753,8 @@ FILE* StartFfmpeg(const Args& args, int width, int height) {
       "ffmpeg -y -loglevel error -f rawvideo -pix_fmt bgr24 -video_size " +
       std::to_string(width) + "x" + std::to_string(height) + " -framerate " +
       std::to_string(kOutputFps) + " -i - -i " + ShellQuote(args.audio) +
-      " -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest " + ShellQuote(args.output);
+      " -c:v libx264 -crf " + std::to_string(args.video_crf) +
+      " -pix_fmt yuv420p -c:a aac -shortest " + ShellQuote(args.output);
   std::cout << "[ffmpeg] encoding " << args.output << '\n';
   FILE* pipe = popen(command.c_str(), "w");
   if (pipe == nullptr) throw std::runtime_error("Cannot start ffmpeg. Ensure it is on PATH.");
@@ -682,7 +794,8 @@ void RunPipeline(const Args& args,
                  const std::vector<FrameAsset>& assets,
                  const WavData& wav,
                  MnnModel& feather,
-                 MnnModel& unet) {
+                 MnnModel& visual_model,
+                 const FaceGeometry& geometry) {
   std::vector<float> features = ExtractFeatherFeatures(feather, wav.samples);
   const int total_frames = static_cast<int>(features.size() / (kTokensPerFrame * kFeatureDim));
   int render_frames = total_frames;
@@ -694,16 +807,21 @@ void RunPipeline(const Args& args,
     std::cout << "[frames] saving PNG frames to " << args.frames_dir << '\n';
   }
   FILE* ffmpeg = StartFfmpeg(args, first_image.width, first_image.height);
+  VisualTimings timings;
+  VisualTimings* timing_output = args.profile ? &timings : nullptr;
   try {
     BouncePicker picker(assets.size());
     for (int frame = 0; frame < render_frames; ++frame) {
-      const FrameAsset& asset = assets[picker.Next()];
+      const size_t asset_position = picker.Next();
+      const FrameAsset& asset = assets[asset_position];
       Image image = LoadImageBgr(asset.image);
       if (image.width != first_image.width || image.height != first_image.height) {
         throw std::runtime_error("All dataset images must share the same resolution.");
       }
-      const Image rendered = RenderFrame(unet, std::move(image), ComputeFaceBbox(asset.landmarks),
-                                         GatherAudioWindow(features, frame));
+      const Bbox bbox = ComputeFaceBbox(asset.landmarks);
+      const std::vector<float> audio_window = GatherAudioWindow(features, frame, geometry);
+      const Image rendered = RenderFrame(
+          visual_model, std::move(image), bbox, audio_window, geometry, timing_output);
       if (!args.frames_dir.empty()) WritePngFrame(args.frames_dir, frame, rendered);
       WriteFrame(ffmpeg, rendered);
       if ((frame + 1) % 25 == 0 || frame + 1 == render_frames) {
@@ -716,15 +834,27 @@ void RunPipeline(const Args& args,
     pclose(ffmpeg);
     throw;
   }
+  if (args.profile && timings.frames > 0) {
+    const double resource_mean = timings.resource_ms / timings.frames;
+    const double model_mean = timings.model_ms / timings.frames;
+    std::cout << std::fixed << std::setprecision(3)
+              << "[profile] visual input-build mean=" << resource_mean << " ms/frame\n"
+              << "[profile] visual model mean=" << model_mean << " ms/frame\n"
+              << "[profile] visual online total mean=" << resource_mean + model_mean
+              << " ms/frame\n";
+  }
   std::cout << "[done] " << args.output << '\n';
 }
 
 void Run(const Args& args) {
   EnsureFile(args.feather_model, "FeatherHuBERT model");
-  EnsureFile(args.unet_model, "UNet model");
+  EnsureFile(args.unet_model, "FeatherTalk visual model");
   EnsureFile(args.audio, "Audio WAV");
 
   const std::vector<FrameAsset> assets = LoadAssets(args.dataset);
+  const FaceGeometry geometry = FeatherTalkGeometry();
+  MnnModel visual_model(
+      args.unet_model, std::vector<std::string>{"input", "audio"}, "output", args);
   const WavData wav = ReadWavMono(args.audio);
   std::cout << "[audio] " << wav.samples.size() << " samples, "
             << static_cast<double>(wav.samples.size()) / wav.sample_rate << " seconds\n";
@@ -732,18 +862,50 @@ void Run(const Args& args) {
   std::cout << "[mnn] backend=" << args.backend << ", precision=" << args.precision
             << ", threads=" << args.threads << '\n';
   MnnModel feather(args.feather_model, {"waveform"}, "hidden", args);
-  MnnModel unet(args.unet_model, {"input", "audio"}, "output", args);
-  RunPipeline(args, assets, wav, feather, unet);
+  RunPipeline(args, assets, wav, feather, visual_model, geometry);
 }
 
 }  // namespace
 
-int main(int argc, char** argv) {
+namespace feathertalk {
+
+bool RunOffline(const OfflineOptions& options, std::string* error) {
+  try {
+    Args args;
+    args.feather_model = options.feather_model;
+    args.unet_model = options.visual_model;
+    args.dataset = options.dataset;
+    args.audio = options.audio_wav;
+    args.output = options.output_mp4;
+    args.frames_dir = options.frames_dir;
+    args.backend = options.backend;
+    args.precision = options.precision;
+    args.threads = options.threads;
+    args.max_frames = options.max_frames;
+    args.video_crf = options.video_crf;
+    args.profile = options.profile;
+    Run(args);
+    return true;
+  } catch (const std::exception& exception) {
+    if (error != nullptr) *error = exception.what();
+    return false;
+  }
+}
+
+int RunCommandLine(int argc, char** argv) {
   try {
     Run(ParseArgs(argc, argv));
     return 0;
-  } catch (const std::exception& error) {
-    std::cerr << "Error: " << error.what() << '\n';
+  } catch (const std::exception& exception) {
+    std::cerr << "Error: " << exception.what() << '\n';
+    return 1;
   }
-  return 1;
 }
+
+}  // namespace feathertalk
+
+#ifndef FEATHERTALK_NO_MAIN
+int main(int argc, char** argv) {
+  return feathertalk::RunCommandLine(argc, argv);
+}
+#endif
