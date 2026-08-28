@@ -72,3 +72,6 @@ syncnet_ckpt/
 
 # Community QR code shown in the README.
 !assets/wechat_group_qr.jpg
+
+# The compact generic audio encoder is intentionally shipped with the source.
+!feather_hubert.pth

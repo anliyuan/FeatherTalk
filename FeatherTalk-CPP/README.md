@@ -29,7 +29,7 @@ From the repository root:
 
 ```bash
 python FeatherTalk-CPP/tools/export_models.py \
-  --feather-checkpoint /path/to/feather_hubert.pth \
+  --feather-checkpoint ./feather_hubert.pth \
   --visual-checkpoint /path/to/visual_model.pth
 
 cd FeatherTalk-CPP

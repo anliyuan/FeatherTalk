@@ -46,8 +46,8 @@ conda activate feathertalk
 pip install -r requirements.txt
 ```
 
-需要准备一份 `feather_hubert.pth` 音频编码器权重。其他权重说明见
-[docs/WEIGHTS.md](docs/WEIGHTS.md)。
+仓库根目录已经包含 `feather_hubert.pth` 音频编码器权重，无需额外下载。
+其他权重说明见 [docs/WEIGHTS.md](docs/WEIGHTS.md)。
 
 ### 2. 准备训练视频
 
@@ -55,7 +55,7 @@ pip install -r requirements.txt
 
 ```bash
 python data_utils/process.py /path/to/person/train.mp4 \
-  --feather_hubert_checkpoint /path/to/feather_hubert.pth
+  --feather_hubert_checkpoint ./feather_hubert.pth
 ```
 
 预处理会在视频所在目录生成训练需要的图像、关键点和音频特征。
@@ -75,7 +75,7 @@ python train.py \
 ```bash
 python data_utils/feather_hubert/feather_hubert.py \
   --wav /path/to/test.wav \
-  --checkpoint /path/to/feather_hubert.pth \
+  --checkpoint ./feather_hubert.pth \
   --out /path/to/test_hu.npy
 ```
 
@@ -102,7 +102,7 @@ C++ 版本可直接读取 WAV，在 MNN 中完成音频编码、视觉模型推�
 
 - 这是个性化模型：每个人物需要单独训练一份视觉权重。
 - 训练视频和收音质量会直接影响最终效果。
-- 大型 checkpoint、ONNX 和 MNN 模型不直接提交到仓库，建议通过 Release 分发。
+- 仓库内置通用 `feather_hubert.pth`；个性化 checkpoint、ONNX 和 MNN 模型不直接提交。
 
 ## License
 
