@@ -1,104 +1,118 @@
 # FeatherTalk
 
-FeatherTalk is a compact, personalized audio-driven talking-head system. The
-public codebase contains one supported pipeline so that training, Python
-inference and C++ deployment all use the same model contract.
+<p align="center">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg"></a>
+  <img src="https://img.shields.io/badge/python-3.10-blue.svg">
+  <a href="https://github.com/anliyuan/FeatherTalk/stargazers"><img src="https://img.shields.io/github/stars/anliyuan/FeatherTalk?style=social"></a>
+</p>
 
-FeatherTalk 是一个轻量级个人数字人项目。开源版只保留一条正式路线，
-训练、Python 推理和 C++ 部署使用完全一致的输入输出协议。
+## 更新：本次更新重新设计了模型结构。加入了新的audio adapter，大幅提升效果，同时保证低耗时运行。我也精简了代码。有问题或优化计划或部署计划的朋友可以扫码加微信群交流。enjoy 🎉
 
-## Model contract
+FeatherTalk is a lightweight personalized talking-head project. Give it a short
+25 FPS video of one person, train a dedicated model, and then drive that person
+with any speech audio.
 
-```text
-16 kHz WAV
-  -> FeatherHuBERT: [1, samples] -> [1, tokens, 1024]
-  -> per-frame audio window: [1, 40, 1024]
+FeatherTalk 是一个轻量级个人数字人项目。准备一段单人口播视频，训练一个专属模型，
+之后就可以用任意语音驱动这个人物说话。支持部署在移动端
 
-reference crop + masked current crop: [1, 6, 144, 144]
-  -> FeatherTalk visual model
-  -> generated crop: [1, 3, 144, 144]
-  -> mouth soft blend into the resource frame
-```
+## Demo / 效果
 
-The audio encoder processes the full WAV once. For each output frame, inference
-only slices the already-computed feature sequence. The 40 tokens correspond to
-20 video frames at 25 FPS.
+两侧使用相同的人物资源和同一段 60 秒音频。左侧是之前的旧版本，
+右侧是当前更新后版本。视频对下半脸做了同比例放大，方便观察唇形和融合效果。视觉上少了很多抖动，很多音节嘴形也更准了。
 
-## Installation
+<video src="./demo/feathertalk_comparison_144.mp4" controls width="100%"></video>
 
-Python 3.10 is recommended. FFmpeg is required for preprocessing and audio/video
-muxing.
+[打开对比视频 / Open comparison video](./demo/feathertalk_comparison_144.mp4)
+
+## Why FeatherTalk? / 为什么选它
+
+- **效果更好**：同时利用前后语音上下文，并针对嘴部细节和连续帧稳定性训练。
+- **模型足够小**：当前视觉模型输入为 144×144，参数量约 **5.46M**。并且我自己重新训练了一个全新的超轻量级音频编码器，参数量计算量都非常小。
+- **推理更高效**：FeatherHuBERT 对整段音频只计算一次，视频推理直接复用音频特征。当然，根据需要，也可以改为流式推理。
+- **真正可部署**：同时提供 Python 训练/推理和 C++/MNN 接入路线，可纯 CPU 运行。可轻松部署移动端。
+
+## Quick Start / 快速开始
+
+### 1. 安装
+
+Python 3.10 和 FFmpeg 是必需的。训练推荐使用 CUDA GPU。
 
 ```bash
+git clone https://github.com/anliyuan/FeatherTalk.git
+cd FeatherTalk
+
 conda create -n feathertalk python=3.10
 conda activate feathertalk
 pip install -r requirements.txt
 ```
 
-For CUDA training, install the PyTorch build matching the machine's CUDA
-version.
+需要准备一份 `feather_hubert.pth` 音频编码器权重。其他权重说明见
+[docs/WEIGHTS.md](docs/WEIGHTS.md)。
 
-## Prepare a training resource
+### 2. 准备训练视频
 
-Use a 25 FPS talking-head video and a FeatherHuBERT checkpoint:
+推荐使用 3–5 分钟、25 FPS 的单人口播视频。人脸需要完整可见，音频尽量清晰、无明显噪声和回声。
 
 ```bash
-cd data_utils
-python process.py /path/to/train.mp4 \
+python data_utils/process.py /path/to/person/train.mp4 \
   --feather_hubert_checkpoint /path/to/feather_hubert.pth
-cd ..
 ```
 
-The resource directory will contain:
+预处理会在视频所在目录生成训练需要的图像、关键点和音频特征。
 
-```text
-person_resource/
-  aud.wav
-  aud_hu.npy
-  full_body_img/
-  landmarks/
-```
-
-## Train
+### 3. 训练
 
 ```bash
 python train.py \
-  --dataset_dir /path/to/person_resource \
+  --dataset_dir /path/to/person \
   --save_dir /path/to/checkpoints \
   --epochs 200 \
   --batchsize 16
 ```
 
-The training objective combines full-crop reconstruction, mouth ROI,
-adjacent-frame temporal, perceptual and optional mouth-gradient losses. See
-`python train.py --help` for their weights.
+### 4. 提取测试音频特征
 
-## Python inference
+```bash
+python data_utils/feather_hubert/feather_hubert.py \
+  --wav /path/to/test.wav \
+  --checkpoint /path/to/feather_hubert.pth \
+  --out /path/to/test_hu.npy
+```
+
+### 5. 生成视频
 
 ```bash
 python inference.py \
-  --dataset /path/to/person_resource \
-  --audio_feat /path/to/aud_hu.npy \
-  --audio_wav /path/to/aud.wav \
-  --checkpoint /path/to/visual_model.pth \
+  --dataset /path/to/person \
+  --audio_feat /path/to/test_hu.npy \
+  --audio_wav /path/to/test.wav \
+  --checkpoint /path/to/checkpoints/199.pth \
   --save_path result.mp4
 ```
 
-## C++ / MNN deployment
+## C++ / MNN
 
-The C++ runner takes a WAV directly, runs FeatherHuBERT and the visual model with
-MNN, blends each generated mouth patch and streams frames to FFmpeg.
+C++ 版本可直接读取 WAV，在 MNN 中完成音频编码、视觉模型推理和回贴合成，
+运行时不依赖 Python、PyTorch、OpenCV 或 ONNX Runtime。
 
-See [FeatherTalk-CPP/README.md](FeatherTalk-CPP/README.md) for model conversion,
-building and runtime commands.
+模型转换、编译和工程接入说明见
+[FeatherTalk-CPP/README.md](FeatherTalk-CPP/README.md)。
 
-## Required weights
+## Notes / 注意
 
-The repository contains only the small face detector and landmark detector used
-by preprocessing. FeatherHuBERT and personalized visual checkpoints should be
-distributed as versioned release assets rather than committed to Git.
+- 这是个性化模型：每个人物需要单独训练一份视觉权重。
+- 训练视频和收音质量会直接影响最终效果。
+- 大型 checkpoint、ONNX 和 MNN 模型不直接提交到仓库，建议通过 Release 分发。
 
 ## License
 
-Apache-2.0. Third-party weights and runtimes retain their own licenses; verify
-their redistribution terms before publishing a release package.
+Apache-2.0. If FeatherTalk helps you, a star is always appreciated. 🎉
+
+## Community / 交流群
+
+欢迎扫码加入 UDH 数字人交流群，一起交流训练、推理、C++ 部署和二次开发。
+群二维码有效期有限，过期后会在这里更新。
+
+<p align="center">
+  <img src="./assets/wechat_group_qr.jpg" alt="UDH 数字人交流群二维码" width="360">
+</p>

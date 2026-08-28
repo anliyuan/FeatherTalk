@@ -1,3 +1,5 @@
+## 以下是一个大致的使用说明，借助AI，你一定可以快速把代码迁移至任何平台,ENJOY 🎉
+
 # FeatherTalk C++ / MNN
 
 This directory contains the standalone C++ inference path for the released
