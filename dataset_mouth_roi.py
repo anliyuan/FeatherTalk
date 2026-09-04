@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import random
 from dataclasses import dataclass
@@ -28,6 +29,41 @@ from face_utils import (
 
 
 _AUDIO_FEAT_FILE = "aud_hu.npy"
+_CLIP_RANGES_FILE = "clip_ranges.json"
+
+
+def load_clip_ranges(
+    dataset_dir: str, frame_count: int
+) -> list[tuple[int, int]]:
+    """Load contiguous ``[start, end)`` clip ranges for boundary-safe audio.
+
+    Datasets without metadata retain the original single-continuous-clip
+    behavior. Independent-clip datasets should provide ``clip_ranges.json``.
+    """
+    path = os.path.join(dataset_dir, _CLIP_RANGES_FILE)
+    if not os.path.exists(path):
+        return [(0, frame_count)]
+
+    with open(path, "r", encoding="utf-8") as file:
+        payload = json.load(file)
+    entries = payload.get("ranges", payload) if isinstance(payload, dict) else payload
+    ranges = [(int(entry["start"]), int(entry["end"])) for entry in entries]
+    if not ranges:
+        raise ValueError(f"{path} contains no clip ranges")
+
+    expected_start = 0
+    for start, end in ranges:
+        if start != expected_start or end <= start:
+            raise ValueError(
+                f"{path} must contain positive, contiguous ranges; "
+                f"expected start {expected_start}, got [{start}, {end})"
+            )
+        expected_start = end
+    if expected_start != frame_count:
+        raise ValueError(
+            f"{path} covers {expected_start} frames, expected {frame_count}"
+        )
+    return ranges
 
 
 @dataclass(frozen=True)
@@ -120,9 +156,16 @@ class MouthRoiDataset(Dataset):
 
         audio_feats_path = os.path.join(dataset_dir, _AUDIO_FEAT_FILE)
         self.audio_feats = np.load(audio_feats_path).astype(np.float32)
+        self.frame_count = min(self.audio_feats.shape[0], len(self.img_path_list))
+        self.clip_ranges = load_clip_ranges(dataset_dir, self.frame_count)
+        self.clip_starts = np.empty(self.frame_count, dtype=np.int32)
+        self.clip_ends = np.empty(self.frame_count, dtype=np.int32)
+        for start, end in self.clip_ranges:
+            self.clip_starts[start:end] = start
+            self.clip_ends[start:end] = end
 
     def __len__(self) -> int:
-        return min(self.audio_feats.shape[0], len(self.img_path_list))
+        return self.frame_count
 
     def _build_target_masked_and_mouth(self, idx: int):
         face_crop = load_face_crop(
@@ -160,7 +203,10 @@ class MouthRoiDataset(Dataset):
         img_concat_T = torch.cat([ref_T, masked_T], dim=0)
 
         audio_feat = gather_audio_window(
-            self.audio_feats, idx
+            self.audio_feats,
+            idx,
+            valid_start=int(self.clip_starts[idx]),
+            valid_end=int(self.clip_ends[idx]),
         )
         audio_feat = reshape_audio_feat(audio_feat)
         return img_concat_T, target_T, audio_feat, mouth_mask_T
@@ -191,13 +237,18 @@ class TemporalMouthRoiDataset(MouthRoiDataset):
         if temporal_stride < 1:
             raise ValueError("temporal_stride must be >= 1")
         self.temporal_stride = temporal_stride
+        self.pair_starts = [
+            idx
+            for start, end in self.clip_ranges
+            for idx in range(start, end - temporal_stride)
+        ]
 
     def __len__(self) -> int:
-        base_len = MouthRoiDataset.__len__(self)
-        return max(0, base_len - self.temporal_stride)
+        return len(self.pair_starts)
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, item: int):
         base_len = MouthRoiDataset.__len__(self)
+        idx = self.pair_starts[item]
         ref_T = self._build_reference_at(random.randint(0, base_len - 1))
         first = self._build_frame(idx, ref_T=ref_T)
         second = self._build_frame(idx + self.temporal_stride, ref_T=ref_T)

@@ -1,4 +1,4 @@
-"""Train the released FeatherTalk model with mouth and temporal losses."""
+"""Train FeatherTalk with mouth-focused and optional temporal losses."""
 
 from __future__ import annotations
 
@@ -220,13 +220,19 @@ def compute_total_loss(
 
     loss_pixel = pixel_criterion(flat_preds, flat_labels)
     loss_mouth = mouth_l1_loss(flat_preds, flat_labels, flat_masks)
-    loss_temporal, loss_temporal_mouth = temporal_delta_losses(
-        preds,
-        labels,
-        mouth_masks,
-        pixel_criterion,
-        lowpass_kernel=temporal_lowpass_kernel,
-    )
+    if temporal_weight != 0.0 or temporal_mouth_weight != 0.0:
+        loss_temporal, loss_temporal_mouth = temporal_delta_losses(
+            preds,
+            labels,
+            mouth_masks,
+            pixel_criterion,
+            lowpass_kernel=temporal_lowpass_kernel,
+        )
+    else:
+        # Independent clips may contain hard cuts.  When temporal supervision is
+        # disabled, avoid both the invalid cross-cut constraint and its compute.
+        loss_temporal = flat_preds.new_zeros(())
+        loss_temporal_mouth = flat_preds.new_zeros(())
     loss_perceptual = perceptual_loss(flat_preds, flat_labels)
     loss_mouth_gradient = mouth_gradient_loss(flat_preds, flat_labels, flat_masks)
     total = (

@@ -21,7 +21,6 @@ from face_utils import (
     gather_audio_window,
     hwc_to_chw_tensor,
     mask_mouth,
-    mouth_soft_blend_mask,
     read_landmarks,
     reshape_audio_feat,
 )
@@ -124,16 +123,11 @@ def paste_prediction(
     bbox: tuple[int, int, int, int],
     original_size: tuple[int, int],
 ) -> None:
-    alpha = mouth_soft_blend_mask(FACE_INNER_SIZE).numpy()[0, :, :, None]
-    current = face_crop[
+    inner_slice = face_crop[
         FACE_BORDER : FACE_BORDER + FACE_INNER_SIZE,
         FACE_BORDER : FACE_BORDER + FACE_INNER_SIZE,
-    ].astype(np.float32)
-    blended = alpha * prediction.astype(np.float32) + (1.0 - alpha) * current
-    face_crop[
-        FACE_BORDER : FACE_BORDER + FACE_INNER_SIZE,
-        FACE_BORDER : FACE_BORDER + FACE_INNER_SIZE,
-    ] = blended.clip(0, 255).round().astype(np.uint8)
+    ]
+    inner_slice[:] = prediction
 
     crop_width, crop_height = original_size
     face_crop = cv2.resize(face_crop, (crop_width, crop_height))
@@ -179,7 +173,13 @@ def run(args: argparse.Namespace, device: torch.device | None = None) -> None:
             prediction = (
                 prediction.cpu().numpy().transpose(1, 2, 0) * 255.0
             ).clip(0, 255).astype(np.uint8)
-            paste_prediction(image, prediction, face_crop, bbox, original_size)
+            paste_prediction(
+                image,
+                prediction,
+                face_crop,
+                bbox,
+                original_size,
+            )
             writer.write(image)
     writer.release()
 

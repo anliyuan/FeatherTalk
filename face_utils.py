@@ -91,23 +91,6 @@ def mask_mouth(img: np.ndarray, inner_size: int = FACE_INNER_SIZE) -> np.ndarray
     return cv2.rectangle(img, rect, (0, 0, 0), -1)
 
 
-def mouth_soft_blend_mask(image_size: int = FACE_INNER_SIZE) -> torch.Tensor:
-    """Return a tighter feathered mask around the moving mouth region.
-
-    The mask keeps generated pixels around the moving mouth and preserves the
-    current resource frame around the cheeks, chin and crop boundary.
-    """
-    yy, xx = np.mgrid[0:image_size, 0:image_size].astype(np.float32)
-    nx = (xx + 0.5) / float(image_size)
-    ny = (yy + 0.5) / float(image_size)
-    dx = (nx - 0.5) / 0.46
-    dy = (ny - 0.37) / 0.34
-    radius = np.sqrt(dx * dx + dy * dy)
-    edge_t = np.clip((radius - 0.82) / (1.0 - 0.82), 0.0, 1.0)
-    alpha = 1.0 - edge_t * edge_t * (3.0 - 2.0 * edge_t)
-    return torch.from_numpy(alpha[None].astype(np.float32))
-
-
 def mouth_fill_mask(image_size: int = FACE_INNER_SIZE) -> torch.Tensor:
     """Return the hard mouth input rectangle used for base-frame filling."""
     scale = image_size / float(GEOMETRY_BASE_SIZE)
@@ -131,17 +114,28 @@ def gather_audio_window(
     features: np.ndarray,
     index: int,
     half_window: int = AUDIO_HALF_WINDOW,
+    valid_start: int = 0,
+    valid_end: int | None = None,
 ) -> torch.Tensor:
-    """取以 index 为中心、半径 half_window 的音频特征窗口，越界处用 0 填充。
+    """取以 index 为中心、半径 half_window 的音频特征窗口。
 
-    返回 shape [2*half_window, ...] 的 tensor，dtype 跟 features 保持一致。
+    ``valid_start`` / ``valid_end`` 可限制窗口只能落在当前独立片段内；
+    超出全局序列或片段边界的部分都用 0 填充。返回 shape
+    ``[2*half_window, ...]``，dtype 与 ``features`` 保持一致。
     """
+    if valid_end is None:
+        valid_end = features.shape[0]
+    if not (0 <= valid_start <= index < valid_end <= features.shape[0]):
+        raise ValueError(
+            "audio index and valid range must satisfy "
+            "0 <= valid_start <= index < valid_end <= len(features)"
+        )
     left = index - half_window
     right = index + half_window
-    pad_left = max(0, -left)
-    pad_right = max(0, right - features.shape[0])
-    left = max(0, left)
-    right = min(features.shape[0], right)
+    pad_left = max(0, valid_start - left)
+    pad_right = max(0, right - valid_end)
+    left = max(valid_start, left)
+    right = min(valid_end, right)
     auds = torch.from_numpy(features[left:right])
     if pad_left > 0:
         padding = torch.zeros(

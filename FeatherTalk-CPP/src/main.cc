@@ -670,20 +670,6 @@ uint8_t ToByte(float value) {
   return static_cast<uint8_t>(std::lround(scaled));
 }
 
-float SmoothStep(float edge0, float edge1, float value) {
-  const float t = std::clamp((value - edge0) / (edge1 - edge0), 0.0F, 1.0F);
-  return t * t * (3.0F - 2.0F * t);
-}
-
-float MouthGeneratedAlpha(int x, int y, int size) {
-  const float nx = (static_cast<float>(x) + 0.5F) / size;
-  const float ny = (static_cast<float>(y) + 0.5F) / size;
-  const float dx = (nx - 0.5F) / 0.46F;
-  const float dy = (ny - 0.37F) / 0.34F;
-  const float radius = std::sqrt(dx * dx + dy * dy);
-  return 1.0F - SmoothStep(0.82F, 1.0F, radius);
-}
-
 Image CompositePrediction(Image image,
                           const Bbox& bbox,
                           Image face_crop,
@@ -698,13 +684,8 @@ Image CompositePrediction(Image image,
     for (int x = 0; x < geometry.inner_size; ++x) {
       uint8_t* pixel = face_crop.Pixel(x + geometry.border, y + geometry.border);
       const int offset = y * geometry.inner_size + x;
-      const float generated_alpha = MouthGeneratedAlpha(x, y, geometry.inner_size);
       for (int channel = 0; channel < 3; ++channel) {
-      const float generated = static_cast<float>(
-            ToByte(prediction[channel * kPlane + offset]));
-      const float original = static_cast<float>(pixel[channel]);
-      pixel[channel] = static_cast<uint8_t>(std::lround(
-          generated * generated_alpha + original * (1.0F - generated_alpha)));
+        pixel[channel] = ToByte(prediction[channel * kPlane + offset]);
       }
     }
   }

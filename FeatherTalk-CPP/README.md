@@ -20,8 +20,8 @@ FeatherTalk visual model
 ```
 
 The runner extracts audio features once for the complete WAV. Each video frame
-uses the corresponding 40-token slice. The generated patch is composited with a
-fixed mouth soft mask.
+uses the corresponding 40-token slice. The generated 144x144 patch directly
+replaces the inner face region.
 
 ## Export and convert models
 
